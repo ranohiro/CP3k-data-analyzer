@@ -1,6 +1,8 @@
 # データ関連
-data\raw-data\processed*
-data\parsed-data\*
+data\raw-data\*.csv
+data\raw-data\processed\*.csv
+data\parsed-data\*_data\*.parquet
+data\parsed-data\*_data\*.json
 
 # メモ
 AI-chat\*.txt
