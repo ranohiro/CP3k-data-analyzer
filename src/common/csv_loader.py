@@ -363,7 +363,7 @@ def _parse_profile_table(lines):
                 time_values.append(
                     float(t)
                 )
-            except:
+            except Exception:
                 pass
 
         absorb_values = []
@@ -374,7 +374,7 @@ def _parse_profile_table(lines):
                 absorb_values.append(
                     float(a)
                 )
-            except:
+            except Exception:
                 pass
 
         n = min(
@@ -498,3 +498,22 @@ def _move_original_csv(csv_path):
         str(csv_path),
         str(dest)
     )
+
+# ==========================================================
+# TEST
+# ==========================================================
+
+#if __name__ == "__main__":
+
+#    csv_file = find_latest_csv(
+#        "../../data/raw-data"
+#    )
+
+#    measurement_df, profile_df, metadata = (
+#        process_csv(csv_file)
+#    )
+
+#    print("measurement:", measurement_df.shape)
+#    print("profile:", profile_df.shape)
+
+#    print("Done.")
