@@ -5,7 +5,7 @@ data/parsed-data/
 data/export/
 
 # メモ
-AI-chat/*.txt
+AI-chat/
 
 # テスト実行用
 test/*.py
