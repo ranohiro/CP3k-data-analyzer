@@ -14,6 +14,7 @@ src/01_correlation_bias.ipynb
 src/02_timecourse_viewer.ipynb
 src/common/analysis_utils.py
 src/*.xlsx
+notebooks/
 
 # キャッシュ関連
 __pycache__/
