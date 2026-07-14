@@ -715,7 +715,7 @@ def plot_suite(
             s=outlier_s,
             alpha=0.95,
             facecolors="none",
-            edgecolors="red",
+            edgecolors=external_colors[is_flagged] if external_colors is not None else "red",
             linewidths=outlier_lw
         )
 
@@ -843,7 +843,7 @@ def plot_suite(
             s=outlier_s,
             alpha=0.95,
             facecolors="none",
-            edgecolors="red",
+            edgecolors=external_colors[is_flagged] if external_colors is not None else "red",
             linewidths=outlier_lw
         )
 
@@ -895,7 +895,7 @@ def plot_suite(
             s=outlier_s,
             alpha=0.95,
             facecolors="none",
-            edgecolors="red",
+            edgecolors=external_colors[is_flagged] if external_colors is not None else "red",
             linewidths=outlier_lw
         )
 
