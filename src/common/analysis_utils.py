@@ -524,7 +524,7 @@ def compute_pair_sample_metrics(df, id_col, group_col, xcol, ycol, a, b, z_thres
 
     cols = [id_col, xcol, ycol] + ([group_col] if has_group else [])
 
-    sub = df[cols].dropna(subset=[xcol, ycol]).copy()
+    sub = df[cols].dropna(subset=[id_col, xcol, ycol]).copy()
 
     if sub.empty:
         return sub
@@ -650,7 +650,12 @@ def pick_outliers_table(
     else:
         flagged = sub.iloc[0:0].copy()
 
-    flagged = flagged.sort_values("abs_z_MAD", ascending=False).head(top_n)
+    if outlier_mode == "error" and "abs_diff_yx" in flagged.columns:
+        flagged = flagged.sort_values("abs_diff_yx", ascending=False).head(top_n)
+    elif "abs_z_MAD" in flagged.columns:
+        flagged = flagged.sort_values("abs_z_MAD", ascending=False).head(top_n)
+    else:
+        flagged = flagged.head(top_n)
 
     return sub, flagged
 
@@ -696,7 +701,7 @@ def plot_suite(
 
     base_cols = [id_col, xcol, ycol] + ([group_col] if has_group else [])
 
-    sub = df[base_cols].dropna(subset=[xcol, ycol]).copy()
+    sub = df[base_cols].dropna(subset=[id_col, xcol, ycol]).copy()
 
     if sub.empty:
         return None, None, None, None, None
@@ -762,8 +767,8 @@ def plot_suite(
             y[is_flagged],
             s=outlier_s,
             alpha=0.95,
-            facecolors="none",
-            edgecolors=external_colors[is_flagged] if external_colors is not None else "red",
+            c=external_colors[is_flagged] if external_colors is not None else "red",
+            edgecolors="black",
             linewidths=outlier_lw
         )
 
@@ -827,7 +832,10 @@ def plot_suite(
 
         if show_outlier_text:
             n_flag = int(len(flagged)) if flagged is not None else 0
-            lines.append(f"乖離候補: |z_MAD|≥{z_thresh}")
+            if outlier_mode == "zMAD":
+                lines.append(f"乖離候補: |z_MAD|≥{z_thresh}")
+            elif outlier_mode == "error":
+                lines.append(f"乖離候補: 許容誤差({pct_thresh}% または X<{abs_thresh})")
             lines.append(f"乖離候補数={n_flag}")
 
         ax1.text(
@@ -848,7 +856,12 @@ def plot_suite(
         and flagged is not None
         and not flagged.empty
     ):
-        top_flagged = flagged.sort_values("abs_z_MAD", ascending=False).head(outlier_label_top)
+        if outlier_mode == "zMAD" and "abs_z_MAD" in flagged.columns:
+            top_flagged = flagged.sort_values("abs_z_MAD", ascending=False).head(outlier_label_top)
+        elif outlier_mode == "error" and "abs_diff_yx" in flagged.columns:
+            top_flagged = flagged.sort_values("abs_diff_yx", ascending=False).head(outlier_label_top)
+        else:
+            top_flagged = flagged.head(outlier_label_top)
 
         for _, row in top_flagged.iterrows():
             try:
@@ -890,8 +903,8 @@ def plot_suite(
             diff_yx[is_flagged],
             s=outlier_s,
             alpha=0.95,
-            facecolors="none",
-            edgecolors=external_colors[is_flagged] if external_colors is not None else "red",
+            c=external_colors[is_flagged] if external_colors is not None else "red",
+            edgecolors="black",
             linewidths=outlier_lw
         )
 
@@ -942,8 +955,8 @@ def plot_suite(
             resid[is_flagged],
             s=outlier_s,
             alpha=0.95,
-            facecolors="none",
-            edgecolors=external_colors[is_flagged] if external_colors is not None else "red",
+            c=external_colors[is_flagged] if external_colors is not None else "red",
+            edgecolors="black",
             linewidths=outlier_lw
         )
 
