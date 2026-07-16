@@ -278,9 +278,9 @@ if st.session_state["df"] is not None:
                             figures.append((fig, method, xcol, ycol))
 
                         summary_rows.append({"regression": method, "X": xcol, "Y": ycol, "n": len(x), "r": r,
-                                             "slope": a, "intercept": b, "BA_bias": bias, "n_outliers": len(flagged)})
+                                             "slope": a, "intercept": b, "BA_bias": bias, "n_outliers": len(flagged) if flagged is not None else 0})
                         if not metrics_df.empty: sample_metric_tables.append(metrics_df.assign(regression=method, X=xcol, Y=ycol))
-                        if not flagged.empty: outlier_tables.append(flagged.assign(regression=method, X=xcol, Y=ycol))
+                        if flagged is not None and not flagged.empty: outlier_tables.append(flagged.assign(regression=method, X=xcol, Y=ycol))
 
                 st.session_state["analysis_results"] = {
                     "run_metadata": run_metadata,
