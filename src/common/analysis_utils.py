@@ -694,8 +694,7 @@ def plot_suite(
 ):
     if fit_info is None:
         fit_info = {}
-    if external_colors is not None: 
-        external_colors = np.asarray(external_colors)
+    if external_colors is not None: external_colors = np.asarray(external_colors)
 
 
     has_group = group_col and group_col in df.columns
