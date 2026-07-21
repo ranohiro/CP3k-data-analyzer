@@ -226,6 +226,9 @@ if st.session_state["df"] is not None:
                 ref_x, ref_y = ref_pair_x, ref_pair_y
                 if ref_x != "(未選択)" and ref_y != "(未選択)" and ref_x != ref_y:
                     df_ref = apply_value_range_filter(df, ref_x, ref_y, use_range=use_range_ck, lo=range_min_txt, hi=range_max_txt)
+                    if id_col in df_ref.columns:
+                        df_ref[id_col] = df_ref[id_col].astype(str).replace(["nan", "None", "<NA>", "NaN"], "Unknown")
+                        df_ref[id_col] = df_ref[id_col].fillna("Unknown")
                     sub_ref = df_ref[[ref_x, ref_y]].dropna()
                     if len(sub_ref) >= 2:
                         xr, yr = sub_ref[ref_x].astype(float).values, sub_ref[ref_y].astype(float).values
@@ -270,11 +273,13 @@ if st.session_state["df"] is not None:
                                 elif target_level == "mild_candidate": color_list.append("yellow")
                                 else: color_list.append("#1f77b4")
 
+                            ref_keys = [k for k, v in ref_outlier_map.items() if v in ("strong_candidate", "candidate", "mild_candidate")] if ref_outlier_map else None
                             fig, used_sub, flagged, bias, loa = plot_suite(
-                            df=df_pair, id_col=id_col, group_col=group_col, xcol=xcol, ycol=ycol,
-                            method=method, lam=lam, a=a, b=b, r=r, fit_info=fit_info,
-                            z_thresh=z_thresh, outlier_label_top=label_top_val,
-                            fig_width=16, fig_height=10, dpi=100, external_colors=color_list
+                                df=df_pair, id_col=id_col, group_col=group_col, xcol=xcol, ycol=ycol,
+                                method=method, lam=lam, a=a, b=b, r=r, fit_info=fit_info,
+                                z_thresh=z_thresh, outlier_label_top=label_top_val,
+                                fig_width=16, fig_height=10, dpi=100, external_colors=color_list,
+                                force_flagged_ids=ref_keys
                             )
 
                             if fig is not None:
