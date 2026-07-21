@@ -688,6 +688,7 @@ def plot_suite(
     fig_height=10,
     dpi=150,
     external_colors=None,
+    force_flagged_ids=None,
     outlier_mode="zMAD",
     pct_thresh=15.0,
     abs_thresh=8.0
@@ -735,6 +736,8 @@ def plot_suite(
     loa_lo = bias - 1.96 * sd if np.isfinite(sd) else np.nan
 
     flagged_ids = set(flagged[id_col].tolist()) if flagged is not None and not flagged.empty else set()
+    if force_flagged_ids is not None:
+        flagged_ids.update(force_flagged_ids)
     is_flagged = sub[id_col].isin(flagged_ids).to_numpy()
 
     if has_group:
