@@ -1,0 +1,16 @@
+{
+  "TAT": {
+    "measurement_unit": "ng/mL",
+    "calibration_method": "Piecewise Linear",
+    "calibration_points": 6,
+    "photometric_section": [10, 20],
+    "processing_type": "区間傾き⊿mAbs/min."
+  },
+  "DD": {
+    "measurement_unit": "μg/mL",
+    "calibration_method": "Cubic Spline",
+    "calibration_points": 6,
+    "photometric_section": [15, 25],
+    "processing_type": "区間傾き⊿mAbs/min."
+  }
+}

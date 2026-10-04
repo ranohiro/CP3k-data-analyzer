@@ -99,6 +99,228 @@ def build_cal_level_table(cal_ids, n_levels, n_replicates):
         
     return table, warning
 
+# === Batch Auto-Assignment (一括自動割り当て) ===
+# UI非依存の純粋関数群。Phase 2 で FastAPI (POST /api/calibrations/auto-assign) へ移植する想定。
+
+_CAL_ID_RE = re.compile(r"^C(\d+)$", re.IGNORECASE)
+
+
+def _natural_key(s):
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", str(s))]
+
+
+def parse_measure_time(value):
+    """'2026/07/28 9:51:47 9:59:49' のような測定日文字列から、日付 + 末尾時刻を datetime として返す。"""
+    parts = str(value).split()
+    if len(parts) >= 2:
+        return pd.to_datetime(f"{parts[0]} {parts[-1]}", errors="coerce")
+    return pd.to_datetime(value, errors="coerce")
+
+
+def split_id_blocks(cal_ids):
+    """C+数字 のIDを番号順に並べ、番号が連続する区間ごとにブロック分割する。"""
+    nums = []
+    for cid in cal_ids:
+        m = _CAL_ID_RE.match(str(cid))
+        if m:
+            nums.append((int(m.group(1)), str(cid)))
+    nums.sort()
+    blocks, cur, prev = [], [], None
+    for n, cid in nums:
+        if prev is not None and n != prev + 1:
+            blocks.append(cur)
+            cur = []
+        cur.append(cid)
+        prev = n
+    if cur:
+        blocks.append(cur)
+    return blocks
+
+
+def assign_block_to_levels(block, values, n_levels):
+    """
+    ブロックをレベルへ割り当てる。
+    - ブロック長が n_levels で割り切れる: ID順に n 個ずつ (装置の登録順 = レベル昇順 × n回)
+    - 割り切れない: 装置測定値の大きなギャップ上位 (n_levels-1) 箇所で分割 (フォールバック)
+    Returns: (level_table, method, warnings)
+    """
+    n_levels = max(1, int(n_levels))
+    if len(block) % n_levels == 0 and len(block) >= n_levels:
+        n = len(block) // n_levels
+        return [block[i * n:(i + 1) * n] for i in range(n_levels)], "ID順", []
+
+    warns = [f"ID数{len(block)}がCal点数{n_levels}で割り切れないため測定値ギャップで分割"]
+    pairs = sorted(((values.get(cid, np.nan), cid) for cid in block),
+                   key=lambda x: (np.inf if not np.isfinite(x[0]) else x[0]))
+    if len(pairs) <= n_levels:
+        return [[cid] for _, cid in pairs], "値ギャップ", warns
+    v = np.array([p[0] for p in pairs], dtype=float)
+    gaps = np.nan_to_num(np.diff(v), nan=0.0)
+    cuts = sorted((np.argsort(gaps)[::-1][: n_levels - 1] + 1).tolist())
+    ids = [p[1] for p in pairs]
+    table, start = [], 0
+    for c in cuts + [len(ids)]:
+        table.append(ids[start:c])
+        start = c
+    return table, "値ギャップ", warns
+
+
+def validate_level_table(level_table, values, cv_limit=15.0):
+    """レベル代表値(中央値)の単調増加とレベル内CVをチェック。Returns: (medians, warnings)"""
+    warns = []
+    meds = []
+    for lv in level_table:
+        vs = [values.get(cid, np.nan) for cid in lv]
+        vs = [x for x in vs if x is not None and np.isfinite(x)]
+        meds.append(float(np.median(vs)) if vs else np.nan)
+    finite = [m for m in meds if np.isfinite(m)]
+    if len(finite) >= 2 and any(np.diff(finite) <= 0):
+        warns.append("レベル代表値が単調増加でない")
+    for k, lv in enumerate(level_table):
+        vs = [values.get(cid, np.nan) for cid in lv]
+        vs = [x for x in vs if x is not None and np.isfinite(x)]
+        if len(vs) >= 2 and np.mean(vs) > 0:
+            cv = float(np.std(vs, ddof=1) / np.mean(vs) * 100.0)
+            if cv > cv_limit:
+                warns.append(f"Cal{k} CV={cv:.1f}%")
+    return meds, warns
+
+
+def auto_assign_calibrators(profile_df, measurement_df, port_to_reagent, reagent_master,
+                            set_gap_minutes=30, default_points=6):
+    """
+    全項目のキャリブレーターを一括で自動割り当てする。
+
+    1. 項目ごとに C+数字 のIDを抽出し、番号の連続性でブロック分割
+    2. 試薬マスターの calibration_points をレベル数として各ブロックをレベル割り当て
+    3. 全ブロックを開始時刻でクラスタリングし Calセット (=Calロット) を推定
+    4. 妥当性チェック (単調増加 / CV)
+
+    Returns: list[dict]  (1要素 = 1本の検量線)
+    """
+    if profile_df is None or profile_df.empty:
+        return []
+
+    times = {}
+    if measurement_df is not None and "測定日" in measurement_df.columns:
+        for rid, t in zip(measurement_df["依頼No."].astype(str), measurement_df["測定日"]):
+            times[rid] = parse_measure_time(t)
+
+    cal_rows = profile_df[profile_df["依頼No."].astype(str).str.match(_CAL_ID_RE)]
+    cal_rows = cal_rows.drop_duplicates(["依頼No.", "項目名"])
+
+    entries = []
+    for item, sub in cal_rows.groupby("項目名"):
+        reagent = port_to_reagent.get(item, "") or ""
+        n_levels = int(reagent_master.get(reagent, {}).get("calibration_points", default_points))
+        if "処理値" in sub.columns:
+            values = {str(k): float(v) if pd.notna(v) else np.nan
+                      for k, v in zip(sub["依頼No."], sub["処理値"])}
+        else:
+            values = {}
+        for block in split_id_blocks(sub["依頼No."].astype(str).tolist()):
+            table, method, w1 = assign_block_to_levels(block, values, n_levels)
+            meds, w2 = validate_level_table(table, values)
+            ts = [times[c] for c in block if c in times and pd.notna(times[c])]
+            n_reps = len(block) // len(table) if table and len(block) % len(table) == 0 else None
+            entries.append({
+                "item": item,
+                "reagent": reagent,
+                "id_range": f"{block[0]}–{block[-1]}",
+                "n_ids": len(block),
+                "n_levels": len(table),
+                "n_reps": n_reps,
+                "method": method,
+                "level_table": table,
+                "level_medians": [round(m, 2) if np.isfinite(m) else None for m in meds],
+                "t_start": min(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else None,
+                "warnings": w1 + w2,
+                "enabled": True,
+            })
+
+    # Calセット推定: 開始時刻順に並べ、set_gap_minutes 以上空いたら別セット
+    def _t(e):
+        return pd.to_datetime(e["t_start"]) if e["t_start"] else pd.Timestamp.max
+
+    set_idx, prev_t = 0, None
+    for e in sorted(entries, key=_t):
+        t = _t(e)
+        if prev_t is not None and t is not pd.Timestamp.max and prev_t is not pd.Timestamp.max:
+            if (t - prev_t).total_seconds() / 60.0 > set_gap_minutes:
+                set_idx += 1
+        e["cal_set"] = f"CalSet-{set_idx + 1}"
+        prev_t = t
+
+    entries.sort(key=lambda e: (_natural_key(e["cal_set"]), _natural_key(e["item"])))
+    return entries
+
+
+def build_cal_config_from_registry(registry, item, cal_set):
+    """一括登録レジストリから、従来形式の cal_config (Step 2 以降で使用) を組み立てる。"""
+    entry = next((e for e in registry.get("entries", [])
+                  if e["item"] == item and e["cal_set"] == cal_set and e.get("enabled", True)), None)
+    if entry is None:
+        return None
+    set_info = registry.get("sets", {}).get(cal_set, {})
+    concs = set_info.get("concentrations", {}).get(entry["reagent"] or "-", [])
+    n_levels = len(entry["level_table"])
+    concs = [float(c) if c is not None else 0.0 for c in concs[:n_levels]]
+    concs += [0.0] * (n_levels - len(concs))
+    return {
+        "lot_name": set_info.get("lot_name", cal_set),
+        "cal_set": cal_set,
+        "item_name": item,
+        "n_levels": n_levels,
+        "n_replicates": entry.get("n_reps") or 1,
+        "concentrations": concs,
+        "level_table": [list(lv) for lv in entry["level_table"]],
+        "aggregation": registry.get("aggregation", "median"),
+    }
+
+
+def save_cal_registry(registry, parsed_dir):
+    """
+    一括登録結果を履歴として保存する。
+    - <parsed_dir>/cal_registry/cal_registry_<timestamp>.json (履歴; Phase 2 で calibrations テーブルへ移行)
+    - <parsed_dir>/cal_config_<item>_<lot>.json (従来形式; ロット差検討 Step 4 との互換)
+    Returns: 保存したレジストリファイルのPath
+    """
+    parsed_dir = Path(parsed_dir)
+    reg_dir = parsed_dir / "cal_registry"
+    reg_dir.mkdir(parents=True, exist_ok=True)
+    ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+    registry = dict(registry)
+    registry.setdefault("created_at", ts)
+    reg_path = reg_dir / f"cal_registry_{ts}.json"
+    save_cal_config(registry, reg_path)
+
+    for e in registry.get("entries", []):
+        if not e.get("enabled", True):
+            continue
+        cfg = build_cal_config_from_registry(registry, e["item"], e["cal_set"])
+        if cfg is None:
+            continue
+        legacy = {
+            "lot_name": cfg["lot_name"],
+            "item_name": cfg["item_name"],
+            "n_levels": cfg["n_levels"],
+            "n_replicates": cfg["n_replicates"],
+            "concentrations": cfg["concentrations"],
+            "levels": [{"level": i, "ids": ids} for i, ids in enumerate(cfg["level_table"])],
+            "aggregation": cfg["aggregation"],
+            "detection_mode": "auto_batch",
+        }
+        safe_lot = re.sub(r"[\\/:*?\"<>|\s]", "_", str(cfg["lot_name"]))
+        save_cal_config(legacy, parsed_dir / f"cal_config_{e['item']}_{safe_lot}.json")
+    return reg_path
+
+
+def list_cal_registries(parsed_dir):
+    reg_dir = Path(parsed_dir) / "cal_registry"
+    if not reg_dir.exists():
+        return []
+    return sorted(reg_dir.glob("cal_registry_*.json"), reverse=True)
+
 # === Rate Calculations ===
 
 def calc_rate(profile_df, request_no, item_name, time_start, time_end) -> float:

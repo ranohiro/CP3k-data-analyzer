@@ -36,6 +36,8 @@ from common.calibration_manager import (
     recalculate_all_samples, save_cal_config, load_cal_config,
     get_cal_level_detail_table, get_cal_level_summary_table,
     compare_two_recalc_results,
+    auto_assign_calibrators, build_cal_config_from_registry,
+    save_cal_registry, list_cal_registries,
 )
 
 setup_japanese_font()
@@ -205,12 +207,65 @@ st.divider()
 if st.session_state["df"] is not None:
     value_cols = st.session_state["value_cols"]
 
-    tab1, tab2, tab3, tab4 = st.tabs(["相関解析", "Excel出力", "タイムコース表示", "キャリブレーション解析"])
+    tab_reagent, tab_calib, tab_measurement, tab_timecourse, tab_correl_old, tab_excel_old = st.tabs([
+        "試薬登録", "キャリブレーション", "検体測定", "タイムコース", "相関解析(旧)", "Excel出力(旧)"
+    ])
 
     # ----------------------------------------------------
-    # TAB 1: 相関解析
+    # TAB 0: 試薬登録
     # ----------------------------------------------------
-    with tab1:
+    with tab_reagent:
+        st.header("試薬登録")
+        st.write("データ内の各測定ポート（項目名）に対して、試薬マスターから適切なパラメーターを割り当てます。")
+        
+        # 試薬マスターの読み込み
+        reagent_master = {}
+        try:
+            with open(PROJECT_ROOT / "data" / "reagent_master.json", "r", encoding="utf-8") as f:
+                reagent_master = json.load(f)
+        except Exception as e:
+            st.warning("試薬マスター(reagent_master.json)が見つかりません。")
+
+        if st.session_state.get("profile_df") is not None and reagent_master:
+            profile_df = st.session_state["profile_df"]
+            unique_items = sorted(list(profile_df["項目名"].dropna().unique()))
+            
+            # デフォルトの割り当てを推論 (項目名がTAT1ならTATを割り当て)
+            port_mapping = []
+            for item in unique_items:
+                assigned_reagent = ""
+                for master_key in reagent_master.keys():
+                    if item.startswith(master_key):
+                        assigned_reagent = master_key
+                        break
+                port_mapping.append({"測定ポート (項目名)": item, "割り当て試薬": assigned_reagent})
+            
+            df_mapping = pd.DataFrame(port_mapping)
+            
+            st.markdown("#### ポート割り当て設定")
+            edited_mapping = st.data_editor(
+                df_mapping,
+                column_config={
+                    "測定ポート (項目名)": st.column_config.TextColumn(disabled=True),
+                    "割り当て試薬": st.column_config.SelectboxColumn(
+                        options=[""] + list(reagent_master.keys()),
+                        required=True
+                    )
+                },
+                use_container_width=True,
+                key="reagent_mapping_editor"
+            )
+            st.session_state["port_mapping"] = edited_mapping
+            
+            st.markdown("#### 登録されている試薬パラメーター一覧")
+            st.json(reagent_master)
+        else:
+            st.info("データ（CSV/Parquet）を読み込むと、ここにポート割り当て設定が表示されます。")
+
+    # ----------------------------------------------------
+    # TAB 1: 相関解析(旧)
+    # ----------------------------------------------------
+    with tab_correl_old:
         st.header("② 解析設定 & 実行")
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -434,9 +489,9 @@ if st.session_state["df"] is not None:
                     break
 
     # ----------------------------------------------------
-    # TAB 2: Excel出力
+    # TAB 2: Excel出力(旧)
     # ----------------------------------------------------
-    with tab2:
+    with tab_excel_old:
         st.header("③ Excel出力")
         if st.session_state["analysis_results"] is None:
             st.warning("先に『相関解析』タブで『②解析実行』を行ってください。")
@@ -518,7 +573,7 @@ if st.session_state["df"] is not None:
     # ----------------------------------------------------
     # TAB 3: タイムコース表示
     # ----------------------------------------------------
-    with tab3:
+    with tab_timecourse:
         st.header("タイムコース反応表示")
         profile_df = st.session_state["profile_df"]
         df = st.session_state["df"]
@@ -661,9 +716,16 @@ if st.session_state["df"] is not None:
                     st.pyplot(fig)
                     plt.close(fig)
     # ----------------------------------------------------
-    # TAB 4: キャリブレーション解析 (ステップ制)
+    # TAB X: 検体測定
     # ----------------------------------------------------
-    with tab4:
+    with tab_measurement:
+        st.header("検体測定")
+        st.write("試薬パラメーターの測光区間を用いて処理値を計算し、キャリブレーション結果を用いて濃度を算出します。")
+
+    # ----------------------------------------------------
+    # TAB 4: キャリブレーション解析
+    # ----------------------------------------------------
+    with tab_calib:
         st.header("キャリブレーション解析（検量線構築 & 濃度再計算）")
         profile_df = st.session_state["profile_df"]
         measurement_df = st.session_state["df"]
@@ -673,160 +735,201 @@ if st.session_state["df"] is not None:
             if not items:
                 st.warning("プロファイルデータに項目名がありません。")
             else:
-                tc_item_tab4 = st.selectbox("解析項目", options=items, key="tc_item_tab4")
-
                 # === Session state for Cal config ===
-                if "cal_config" not in st.session_state:
-                    st.session_state["cal_config"] = None
-                if "cal_patterns" not in st.session_state:
-                    st.session_state["cal_patterns"] = None
-                if "cal_results" not in st.session_state:
-                    st.session_state["cal_results"] = None
+                for _k in ("cal_config", "cal_patterns", "cal_results", "cal_registry", "cal_registry_draft", "cal_selection_key"):
+                    if _k not in st.session_state:
+                        st.session_state[_k] = None
 
-                # ============================================================
-                # Step 1: キャリブレーター登録
-                # ============================================================
-                st.subheader("Step 1: キャリブレーター登録")
-
-                col_mode, col_lot = st.columns(2)
-                with col_mode:
-                    cal_detect_mode = st.radio(
-                        "キャリブレーター認識方法",
-                        ["ID自動検出 (C+数字)", "属性キーワード検出", "手動指定"],
-                        key="cal_detect_mode",
-                        horizontal=True,
-                    )
-                with col_lot:
-                    # ロードされた設定があれば初期値に使用
-                    loaded_cfg = st.session_state.get("loaded_cal_config")
-                    default_lot = loaded_cfg.get("lot_name", "Lot-A") if loaded_cfg else "Lot-A"
-                    lot_name = st.text_input("ロット名（任意ラベル）", value=default_lot, key="lot_name")
-
-                # Detect calibrator IDs
-                mode_map = {"ID自動検出 (C+数字)": "id_pattern", "属性キーワード検出": "attribute", "手動指定": "id_pattern"}
-                detect_mode = mode_map[cal_detect_mode]
-
-                attr_keywords = None
-                if cal_detect_mode == "属性キーワード検出":
-                    kw_input = st.text_input("検索キーワード (カンマ区切り)", "CAL, cal, キャリブ, STD, 標準", key="cal_kw")
-                    attr_keywords = [k.strip() for k in kw_input.split(",") if k.strip()]
-
-                if cal_detect_mode != "手動指定":
-                    all_detected_ids = detect_calibrators(
-                        measurement_df, profile_df, tc_item_tab4,
-                        mode=detect_mode, keywords=attr_keywords
-                    )
-                    # 複数ロット混在対策: 対象IDをマルチセレクトで絞り込み可能に
-                    selected_ids = st.multiselect(
-                        f"対象とするキャリブレーターIDを選択 ({len(all_detected_ids)}件検出)",
-                        options=all_detected_ids,
-                        default=all_detected_ids,
-                        help="ロットAやロットBが混在している場合、対象とするロットのIDだけを選択してください。"
-                    )
-                    detected_ids = selected_ids
+                # 試薬マスター & ポート割り当て (試薬登録タブの結果を利用)
+                try:
+                    with open(PROJECT_ROOT / "data" / "reagent_master.json", "r", encoding="utf-8") as f:
+                        _rmaster = json.load(f)
+                except Exception:
+                    _rmaster = {}
+                _pm = st.session_state.get("port_mapping")
+                if isinstance(_pm, pd.DataFrame) and not _pm.empty:
+                    port_to_reagent = dict(zip(_pm["測定ポート (項目名)"], _pm["割り当て試薬"].fillna("")))
                 else:
-                    manual_ids = st.text_input("キャリブレーターID (カンマ区切り)", "C001, C002, C003", key="cal_manual_ids")
-                    detected_ids = [s.strip() for s in manual_ids.split(",") if s.strip()]
+                    port_to_reagent = {it: next((k for k in _rmaster if str(it).startswith(k)), "") for it in items}
 
-                col_lv, col_rep, col_agg = st.columns(3)
-                with col_lv:
-                    default_n_levels = loaded_cfg.get("n_levels", min(6, max(2, len(detected_ids)))) if loaded_cfg else min(6, max(2, len(detected_ids)))
-                    n_levels = st.number_input("レベル数", min_value=2, max_value=12, value=int(default_n_levels), key="n_levels")
-                with col_rep:
-                    default_n_reps = loaded_cfg.get("n_replicates", max(1, len(detected_ids) // max(int(n_levels), 1))) if loaded_cfg else max(1, len(detected_ids) // max(int(n_levels), 1))
-                    n_reps = st.number_input("各レベルの測定回数 (n数)", min_value=1, max_value=10, value=int(default_n_reps), key="n_reps")
-                with col_agg:
-                    default_agg = loaded_cfg.get("aggregation", "median") if loaded_cfg else "median"
-                    agg_method = st.selectbox("代表値算出法", ["median", "mean"], index=0 if default_agg == "median" else 1,
-                                              format_func=lambda x: "中央値" if x == "median" else "平均値", key="agg_method")
+                # ============================================================
+                # Step 1: キャリブレーター一括登録
+                # ============================================================
+                st.subheader("Step 1: キャリブレーター一括登録")
+                st.caption("全項目のC+数字IDを自動検出し、ID連番ブロック × 試薬マスターのCal点数でレベル割り当て、"
+                           "測定時刻でCalセット（Calロット）を推定します。濃度はCalセット×試薬ごとに1回入力するだけです。")
 
-                # Build level table
-                level_table, level_warning = build_cal_level_table(detected_ids, n_levels, n_reps)
-                if level_warning:
-                    st.warning(f"⚠ {level_warning}")
-
-                # Editable concentration + ID table via st.data_editor
-                cal_edit_rows = []
-                loaded_concs = loaded_cfg.get("concentrations", []) if loaded_cfg else []
-                for i in range(n_levels):
-                    ids_str = ", ".join(level_table[i]) if i < len(level_table) else ""
-                    init_conc = loaded_concs[i] if i < len(loaded_concs) else 0.0
-                    cal_edit_rows.append({
-                        "レベル": f"Cal {i}",
-                        "表示値濃度": float(init_conc),
-                        "依頼No. (n回分)": ids_str,
-                    })
-                cal_edit_df = pd.DataFrame(cal_edit_rows)
-
-                st.markdown("**キャリブレーター定義テーブル** — 表示値濃度を入力してください")
-                edited_cal_df = st.data_editor(
-                    cal_edit_df,
-                    column_config={
-                        "レベル": st.column_config.TextColumn(disabled=True),
-                        "表示値濃度": st.column_config.NumberColumn(min_value=0.0, format="%.2f"),
-                        "依頼No. (n回分)": st.column_config.TextColumn(),
-                    },
-                    use_container_width=True,
-                    num_rows="fixed",
-                    key="cal_editor",
-                )
-
-                # Save / Load buttons
-                col_save, col_load = st.columns(2)
-                with col_save:
-                    if st.button("💾 Cal設定をJSONに保存", key="save_cal"):
-                        parsed_dir = st.session_state.get("parsed_dir")
-                        if parsed_dir:
-                            config = {
-                                "lot_name": lot_name,
-                                "item_name": tc_item_tab4,
-                                "n_levels": n_levels,
-                                "n_replicates": n_reps,
-                                "concentrations": edited_cal_df["表示値濃度"].tolist(),
-                                "levels": [
-                                    {"level": i, "ids": [s.strip() for s in edited_cal_df.iloc[i]["依頼No. (n回分)"].split(",") if s.strip()]}
-                                    for i in range(len(edited_cal_df))
-                                ],
-                                "aggregation": agg_method,
-                                "detection_mode": detect_mode,
-                            }
-                            save_path = Path(parsed_dir) / f"cal_config_{tc_item_tab4}_{lot_name}.json"
-                            save_cal_config(config, save_path)
-                            st.success(f"保存完了: {save_path.name}")
-                with col_load:
-                    parsed_dir = st.session_state.get("parsed_dir")
-                    if parsed_dir:
-                        cal_jsons = sorted(list(Path(parsed_dir).glob(f"cal_config_{tc_item_tab4}_*.json")))
-                        if not cal_jsons:
-                            cal_jsons = sorted(list(Path(parsed_dir).glob("cal_config_*.json")))
-                        if cal_jsons:
-                            selected_json = st.selectbox("保存済みJSONから読込", [p.name for p in cal_jsons], key="load_cal_json")
-                            if st.button("📂 読み込み", key="load_cal_btn"):
-                                loaded = load_cal_config(Path(parsed_dir) / selected_json)
-                                st.session_state["loaded_cal_config"] = loaded
-                                st.success(f"読み込み完了: {selected_json}")
-                                st.rerun()
-
-                if st.button("▶ Step 1 完了: Calを登録", type="primary", key="btn_cal_register"):
-                    concentrations = edited_cal_df["表示値濃度"].tolist()
-                    final_level_table = []
-                    for i in range(len(edited_cal_df)):
-                        ids = [s.strip() for s in edited_cal_df.iloc[i]["依頼No. (n回分)"].split(",") if s.strip()]
-                        final_level_table.append(ids)
-
-                    if all(c == 0.0 for c in concentrations):
-                        st.error("表示値濃度が全て0.0です。各レベルの濃度を入力してください。")
+                col_det, col_gap, col_hist = st.columns([1, 1, 2])
+                with col_gap:
+                    set_gap = st.number_input("Calセット区切り (分)", min_value=1, max_value=600, value=30,
+                                              help="Calブロックの開始時刻がこの時間以上離れていたら別のCalセットとみなします。",
+                                              key="cal_set_gap")
+                with col_det:
+                    st.write("")
+                    if st.button("🔍 自動検出", type="primary", key="btn_cal_autodetect", use_container_width=True):
+                        entries = auto_assign_calibrators(profile_df, measurement_df, port_to_reagent, _rmaster,
+                                                          set_gap_minutes=int(set_gap))
+                        st.session_state["cal_registry_draft"] = {"entries": entries, "sets": {}, "aggregation": "median"}
+                        st.session_state.pop("cal_entries_editor", None)
+                        st.session_state.pop("cal_conc_editor", None)
+                with col_hist:
+                    _pdir = st.session_state.get("parsed_dir")
+                    _hist = list_cal_registries(_pdir) if _pdir else []
+                    if _hist:
+                        _sel_hist = st.selectbox("登録履歴から読込", [p.name for p in _hist], key="cal_hist_sel")
+                        if st.button("📂 履歴を読み込む", key="btn_cal_hist_load"):
+                            st.session_state["cal_registry_draft"] = load_cal_config(Path(_pdir) / "cal_registry" / _sel_hist)
+                            st.session_state.pop("cal_entries_editor", None)
+                            st.session_state.pop("cal_conc_editor", None)
+                            st.rerun()
                     else:
-                        st.session_state["cal_config"] = {
-                            "lot_name": lot_name,
-                            "item_name": tc_item_tab4,
-                            "n_levels": n_levels,
-                            "n_replicates": n_reps,
-                            "concentrations": concentrations,
-                            "level_table": final_level_table,
-                            "aggregation": agg_method,
-                        }
-                        st.success(f"✅ キャリブレーター登録完了: {lot_name} / {n_levels}レベル × n={n_reps}")
+                        st.caption("登録履歴はまだありません。")
+
+                draft = st.session_state.get("cal_registry_draft")
+                if draft and draft.get("entries"):
+                    entries = draft["entries"]
+
+                    # --- 1-a: 自動割り当て結果の確認・編集 ---
+                    st.markdown("**① 自動割り当て結果** — Calセット名の修正・使用有無を編集できます")
+                    ent_df = pd.DataFrame([{
+                        "使用": e.get("enabled", True),
+                        "Calセット": e["cal_set"],
+                        "項目": e["item"],
+                        "試薬": e["reagent"] or "-",
+                        "ID範囲": e["id_range"],
+                        "レベル×n": f"{e['n_levels']}×{e['n_reps'] if e['n_reps'] else '?'}",
+                        "割当方法": e["method"],
+                        "開始時刻": (e["t_start"] or "")[-8:],
+                        "装置測定値(レベル中央値)": ", ".join("-" if m is None else f"{m:g}" for m in e["level_medians"]),
+                        "判定": "✅ OK" if not e["warnings"] else "⚠ " + " / ".join(e["warnings"]),
+                    } for e in entries])
+                    edited_ent = st.data_editor(
+                        ent_df,
+                        column_config={c: st.column_config.Column(disabled=True) for c in ent_df.columns if c not in ("使用", "Calセット")},
+                        use_container_width=True, hide_index=True, num_rows="fixed", key="cal_entries_editor",
+                    )
+                    for e, (_, row) in zip(entries, edited_ent.iterrows()):
+                        e["enabled"] = bool(row["使用"])
+                        e["cal_set"] = str(row["Calセット"]).strip() or e["cal_set"]
+
+                    n_warn = sum(1 for e in entries if e["warnings"] and e.get("enabled", True))
+                    if n_warn:
+                        st.warning(f"⚠ {n_warn}件に警告があります。割り当てを確認してください（低濃度レベルのCV警告は多くの場合問題ありません）。")
+
+                    # --- 1-b: Calセット × 試薬ごとの表示値濃度 & ロット名 ---
+                    st.markdown("**② Calセット別 表示値濃度・ロット名** — セット×試薬ごとに1回入力すれば全項目へ反映されます")
+                    keys = sorted({(e["cal_set"], e["reagent"] or "-") for e in entries if e.get("enabled", True)})
+                    max_lv = max([e["n_levels"] for e in entries] + [1])
+                    old_sets = draft.get("sets", {})
+                    conc_rows = []
+                    for cs, rg in keys:
+                        prev = old_sets.get(cs, {})
+                        prev_c = prev.get("concentrations", {}).get(rg, [])
+                        n_items = sum(1 for e in entries if e["cal_set"] == cs and (e["reagent"] or "-") == rg and e.get("enabled", True))
+                        row = {"Calセット": cs, "試薬": rg, "ロット名": prev.get("lot_name", cs), "対象項目数": n_items}
+                        for i in range(max_lv):
+                            row[f"Cal{i}"] = float(prev_c[i]) if i < len(prev_c) and prev_c[i] is not None else 0.0
+                        conc_rows.append(row)
+                    conc_df = pd.DataFrame(conc_rows)
+                    conc_cfg = {"Calセット": st.column_config.TextColumn(disabled=True),
+                                "試薬": st.column_config.TextColumn(disabled=True),
+                                "対象項目数": st.column_config.NumberColumn(disabled=True)}
+                    for i in range(max_lv):
+                        conc_cfg[f"Cal{i}"] = st.column_config.NumberColumn(min_value=0.0, format="%.3f")
+                    edited_conc = st.data_editor(conc_df, column_config=conc_cfg, use_container_width=True,
+                                                 hide_index=True, num_rows="fixed", key="cal_conc_editor")
+
+                    new_sets = {}
+                    for _, r in edited_conc.iterrows():
+                        s = new_sets.setdefault(r["Calセット"], {"lot_name": r["ロット名"], "concentrations": {}})
+                        s["lot_name"] = str(r["ロット名"]).strip() or r["Calセット"]
+                        s["concentrations"][r["試薬"]] = [float(r[f"Cal{i}"]) for i in range(max_lv)]
+                    draft["sets"] = new_sets
+
+                    default_agg = draft.get("aggregation", "median")
+                    draft["aggregation"] = st.selectbox("代表値算出法", ["median", "mean"], index=0 if default_agg == "median" else 1,
+                                                        format_func=lambda x: "中央値" if x == "median" else "平均値", key="agg_method")
+
+                    if st.button("▶ Step 1 完了: 全項目を一括登録", type="primary", key="btn_cal_register"):
+                        zero_sets = [f"{cs}/{rg}" for cs, rg in keys
+                                     if all(c == 0.0 for c in new_sets.get(cs, {}).get("concentrations", {}).get(rg, [0.0]))]
+                        if zero_sets:
+                            st.error(f"表示値濃度が未入力（全て0）のCalセットがあります: {', '.join(zero_sets)}")
+                        else:
+                            registry = json.loads(json.dumps(draft, default=str))
+                            st.session_state["cal_registry"] = registry
+                            st.session_state["cal_selection_key"] = None
+                            _pdir = st.session_state.get("parsed_dir")
+                            msg = ""
+                            if _pdir:
+                                try:
+                                    reg_path = save_cal_registry(registry, _pdir)
+                                    msg = f"（履歴保存: cal_registry/{reg_path.name}）"
+                                except Exception as ex:
+                                    msg = f"（履歴保存に失敗: {ex}）"
+                            n_ok = sum(1 for e in registry["entries"] if e.get("enabled", True))
+                            st.success(f"✅ {n_ok}本の検量線定義を一括登録しました {msg}")
+                elif draft is not None:
+                    st.info("キャリブレーター（C+数字のID）が検出されませんでした。")
+                else:
+                    st.info("「🔍 自動検出」を押すか、登録履歴を読み込んでください。")
+
+                st.divider()
+
+                # ============================================================
+                # 解析対象の選択 (項目 × Calセット)
+                # ============================================================
+                st.subheader("解析対象の選択")
+                registry = st.session_state.get("cal_registry")
+                if not registry:
+                    st.info("Step 1 で一括登録を完了すると、ここで項目とCalセットを選択できます。")
+                    st.session_state["cal_config"] = None
+                    tc_item_tab4 = items[0]
+                else:
+                    reg_entries = [e for e in registry["entries"] if e.get("enabled", True)]
+                    reg_items = sorted({e["item"] for e in reg_entries}, key=lambda s: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)])
+                    col_si, col_ss = st.columns(2)
+                    with col_si:
+                        tc_item_tab4 = st.selectbox("解析項目", options=reg_items, key="tc_item_tab4")
+                    with col_ss:
+                        set_opts = [e["cal_set"] for e in reg_entries if e["item"] == tc_item_tab4]
+                        sel_set = st.selectbox(
+                            "Calセット", options=set_opts, key="tc_calset_tab4",
+                            format_func=lambda s: f"{s} ({registry['sets'].get(s, {}).get('lot_name', s)})",
+                        )
+
+                    base_cfg = build_cal_config_from_registry(registry, tc_item_tab4, sel_set)
+                    sel_key = f"{tc_item_tab4}|{sel_set}"
+                    if st.session_state.get("cal_selection_key") != sel_key:
+                        st.session_state["cal_selection_key"] = sel_key
+                        st.session_state["cal_results"] = None
+                        st.session_state["cal_patterns"] = None
+                        st.session_state["lot_comparison_data"] = None
+
+                    # 個別修正 (例外時のみ)
+                    with st.expander("✏️ この項目のレベル表を個別に修正する（例外時のみ）", expanded=False):
+                        lv_df = pd.DataFrame([{
+                            "レベル": f"Cal {i}",
+                            "表示値濃度": base_cfg["concentrations"][i],
+                            "依頼No. (n回分)": ", ".join(ids),
+                        } for i, ids in enumerate(base_cfg["level_table"])])
+                        edited_lv = st.data_editor(
+                            lv_df,
+                            column_config={
+                                "レベル": st.column_config.TextColumn(disabled=True),
+                                "表示値濃度": st.column_config.NumberColumn(min_value=0.0, format="%.3f"),
+                            },
+                            use_container_width=True, hide_index=True, num_rows="fixed",
+                            key=f"cal_editor_{sel_key}",
+                        )
+                        base_cfg["concentrations"] = [float(v) for v in edited_lv["表示値濃度"]]
+                        base_cfg["level_table"] = [[s.strip() for s in str(v).split(",") if s.strip()]
+                                                   for v in edited_lv["依頼No. (n回分)"]]
+
+                    st.session_state["cal_config"] = base_cfg
+                    lv_desc = " / ".join(f"Cal{i}={c:g}" for i, c in enumerate(base_cfg["concentrations"]))
+                    st.caption(f"選択中: **{tc_item_tab4}** × **{base_cfg['lot_name']}** "
+                               f"({base_cfg['n_levels']}レベル × n={base_cfg['n_replicates']}) — {lv_desc}")
 
                 st.divider()
 
